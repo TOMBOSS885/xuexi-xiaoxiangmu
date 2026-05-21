@@ -107,6 +107,32 @@
       color: #087b70;
       background: var(--soft-green);
     }
+    .mode-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-right: 8px;
+      padding: 3px;
+      border: 1px solid #b9dde6;
+      border-radius: 999px;
+      background: #f7fffd;
+    }
+    .mode-controls button {
+      border: 0;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: transparent;
+      color: #4c7580;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    .mode-controls button.active {
+      background: linear-gradient(135deg, #18a58f, #55b7f4);
+      color: #ffffff;
+      box-shadow: 0 5px 12px rgba(24, 128, 151, .17);
+    }
     .topbar-right {
       display: flex;
       align-items: center;
@@ -194,6 +220,11 @@
         radial-gradient(circle at 10% 10%, rgba(85,183,244,.16), transparent 28%),
         linear-gradient(180deg, #f3fbff, #eefaf6);
     }
+    .pages.paged {
+      padding: 28px 24px;
+      scroll-snap-type: y mandatory;
+      scroll-padding-block: 28px;
+    }
     .page {
       margin: 0 auto 30px;
       max-width: 960px;
@@ -203,6 +234,19 @@
       background: rgba(255,255,255,.56);
       box-shadow: 0 10px 28px rgba(20,85,98,.13);
       transition: border-color .18s, transform .18s, box-shadow .18s;
+    }
+    .pages.paged .page {
+      min-height: calc(100% - 64px);
+      height: calc(100% - 64px);
+      width: 100%;
+      max-width: none;
+      margin: 32px auto;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      overflow: hidden;
+      scroll-snap-align: center;
+      scroll-snap-stop: always;
     }
     .page.active {
       border-color: var(--accent);
@@ -223,6 +267,25 @@
       display: block;
       border-radius: 8px;
       background: #fff;
+    }
+    .page-visual {
+      width: 100%;
+    }
+    .pages.paged .page-visual {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .pages.paged .page img {
+      width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
     }
     .notes {
       padding: 22px 20px 80px;
@@ -604,6 +667,7 @@
       .canvas-chat { display: none; }
       .pages { border-right: 0; }
       .layout-controls { display: none; }
+      .mode-controls { display: none; }
       .fullscreen-btn { display: none; }
     }
   </style>
@@ -616,6 +680,10 @@
         <div class="meta" id="deckMeta">未分类 · 原页面同步阅读</div>
       </div>
       <div class="topbar-right">
+        <div class="mode-controls" aria-label="PPT 阅读模式">
+          <button type="button" data-reading-mode="paged">逐页</button>
+          <button type="button" data-reading-mode="continuous">连续</button>
+        </div>
         <div class="layout-controls" aria-label="阅读器宽度比例">
           <button type="button" data-layout-preset="balanced">均衡</button>
           <button type="button" data-layout-preset="reading">原页优先</button>
@@ -726,6 +794,9 @@
     let layoutState = { pages: 1.15, notes: 0.85, chat: 0.55 };
     let chatCollapsed = false;
     let activeResize = null;
+    let readingMode = 'paged';
+    let pageWheelDelta = 0;
+    let lastPageSwitchAt = 0;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -791,6 +862,35 @@
     function saveLayoutState() {
       localStorage.setItem(globalStorageKey('layout'), JSON.stringify(layoutState));
       localStorage.setItem(globalStorageKey('chatCollapsed'), String(chatCollapsed));
+    }
+
+    function loadReadingMode() {
+      const saved = localStorage.getItem(globalStorageKey('readingMode'));
+      readingMode = saved === 'continuous' ? 'continuous' : 'paged';
+      applyReadingMode();
+    }
+
+    function saveReadingMode() {
+      localStorage.setItem(globalStorageKey('readingMode'), readingMode);
+    }
+
+    function applyReadingMode() {
+      pageRoot.classList.toggle('paged', readingMode === 'paged');
+      document.querySelectorAll('[data-reading-mode]').forEach(button => {
+        button.classList.toggle('active', button.dataset.readingMode === readingMode);
+      });
+      if (readingMode === 'paged' && pages.length) {
+        window.setTimeout(() => centerPage(currentSlideNumber, 'auto'), 40);
+      }
+    }
+
+    function setReadingMode(mode) {
+      readingMode = mode === 'continuous' ? 'continuous' : 'paged';
+      applyReadingMode();
+      saveReadingMode();
+      if (readingMode === 'paged') {
+        centerPage(currentSlideNumber, 'smooth');
+      }
     }
 
     function applyLayoutState() {
@@ -906,7 +1006,30 @@
       return pages.find(item => Number(item.slideNumber) === Number(slideNumber)) || null;
     }
 
-    function setActive(pageNumber) {
+    function pageIndexForSlide(slideNumber) {
+      return pages.findIndex(item => Number(item.slideNumber) === Number(slideNumber));
+    }
+
+    function centerPage(slideNumber, behavior = 'smooth') {
+      const page = document.getElementById(`page-${Number(slideNumber)}`);
+      if (!page) return;
+      const top = page.offsetTop - Math.max(0, (pageRoot.clientHeight - page.offsetHeight) / 2);
+      pageRoot.scrollTo({ top, behavior });
+    }
+
+    function navigateSlide(delta) {
+      if (!pages.length) return;
+      const currentIndex = Math.max(0, pageIndexForSlide(currentSlideNumber));
+      const nextIndex = clamp(currentIndex + delta, 0, pages.length - 1);
+      const nextSlide = Number(pages[nextIndex].slideNumber);
+      if (nextSlide === currentSlideNumber) {
+        centerPage(nextSlide, 'smooth');
+        return;
+      }
+      setActive(nextSlide, { scrollPage: true, behavior: 'smooth' });
+    }
+
+    function setActive(pageNumber, options = {}) {
       currentSlideNumber = Number(pageNumber || 1);
       document.querySelectorAll('.page.active,.note.active').forEach(el => el.classList.remove('active'));
       const page = document.getElementById(`page-${currentSlideNumber}`);
@@ -918,6 +1041,9 @@
       }
       current.textContent = `第 ${currentSlideNumber} 页`;
       renderChatForPage(currentSlideNumber);
+      if (options.scrollPage) {
+        centerPage(currentSlideNumber, options.behavior || 'smooth');
+      }
       saveScrollState();
     }
 
@@ -934,6 +1060,7 @@
       frame.style.height = `${Math.max(360, height - 15)}px`;
       Streamlit.setFrameHeight(height);
       loadLayoutState();
+      loadReadingMode();
 
       deckTitle.textContent = String(args.title || '学习资料');
       deckMeta.textContent = `${String(args.subject || '未分类')} · 原页面同步阅读`;
@@ -959,7 +1086,9 @@
             <span>第 ${page.slideNumber} 页</span>
             <span>${escapeHtml(page.title)}</span>
           </div>
-          <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
+          <div class="page-visual">
+            <img src="${page.image}" alt="第 ${page.slideNumber} 页原页面" loading="lazy" />
+          </div>
         </article>
       `).join('');
 
@@ -989,7 +1118,11 @@
       window.setTimeout(() => {
         const state = stored || restoreScrollAfterRender;
         if (!state) return;
-        pageRoot.scrollTop = state.pageScroll || 0;
+        if (readingMode === 'paged') {
+          centerPage(targetSlide, 'auto');
+        } else {
+          pageRoot.scrollTop = state.pageScroll || 0;
+        }
         noteRoot.scrollTop = state.noteScroll || 0;
         renderChatForPage(currentSlideNumber);
       }, 80);
@@ -1155,6 +1288,44 @@
       selectionToolbar.classList.remove('show');
     }
 
+    function handlePagedWheel(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      const now = Date.now();
+      pageWheelDelta += event.deltaY;
+      if (Math.abs(pageWheelDelta) < 90 || now - lastPageSwitchAt < 260) return;
+      const direction = pageWheelDelta > 0 ? 1 : -1;
+      pageWheelDelta = 0;
+      lastPageSwitchAt = now;
+      navigateSlide(direction);
+    }
+
+    function handleReaderKeydown(event) {
+      const target = event.target;
+      const isEditing = target?.closest?.('textarea, input, select, button, [contenteditable="true"]');
+      if (isEditing) return;
+      if (readingMode !== 'paged') return;
+      const key = event.key;
+      if (key === 'ArrowDown' || key === 'PageDown' || (key === ' ' && !event.shiftKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        navigateSlide(1);
+      } else if (key === 'ArrowUp' || key === 'PageUp' || (key === ' ' && event.shiftKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        navigateSlide(-1);
+      } else if (key === 'Home') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (pages.length) setActive(Number(pages[0].slideNumber), { scrollPage: true, behavior: 'smooth' });
+      } else if (key === 'End') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (pages.length) setActive(Number(pages[pages.length - 1].slideNumber), { scrollPage: true, behavior: 'smooth' });
+      }
+    }
+
     function copyCurrentSelection() {
       const payload = currentSelectionPayload || buildSelectionPayload();
       if (!payload) return;
@@ -1173,9 +1344,13 @@
     document.querySelectorAll('[data-layout-preset]').forEach(button => {
       button.addEventListener('click', () => setLayoutPreset(button.dataset.layoutPreset));
     });
+    document.querySelectorAll('[data-reading-mode]').forEach(button => {
+      button.addEventListener('click', () => setReadingMode(button.dataset.readingMode));
+    });
     readerGrid.addEventListener('mousedown', startResize);
     window.addEventListener('mousemove', updateResize);
     window.addEventListener('mouseup', stopResize);
+    window.addEventListener('keydown', handleReaderKeydown, { capture: true });
     clearQuoteButton.addEventListener('click', () => {
       currentChatQuote = null;
       renderQuotePreview();
@@ -1210,6 +1385,10 @@
     function containedWheelScroll(event) {
       const panel = nearestScrollPanel(event.target);
       if (!panel) return;
+      if (panel === pageRoot && readingMode === 'paged') {
+        handlePagedWheel(event);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
