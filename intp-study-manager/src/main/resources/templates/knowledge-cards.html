@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head(${pageTitle})}"></head>
+<body>
+<div class="app-shell">
+    <aside th:replace="~{fragments/layout :: sidebar(${active})}"></aside>
+    <main class="main">
+        <header th:replace="~{fragments/layout :: topbar(${pageTitle})}"></header>
+        <div th:replace="~{fragments/layout :: flash}"></div>
+
+        <section class="grid two">
+            <div class="panel">
+                <h2>创建知识点卡片</h2>
+                <form th:action="@{/knowledge-cards}" method="post">
+                    <div class="grid two">
+                        <label>科目 <input name="subject" placeholder="例如：信号与系统"></label>
+                        <label>知识点 <input name="topic" placeholder="例如：Z 变换稳定性" required></label>
+                    </div>
+                    <label>核心问题 <textarea name="coreQuestion" placeholder="这个知识点想解决什么问题？"></textarea></label>
+                    <label>一句话解释 <textarea name="oneSentence" required></textarea></label>
+                    <label>公式 / 逻辑推导 <textarea name="logicOrFormula"></textarea></label>
+                    <label>典型题 / 应用场景 <textarea name="application"></textarea></label>
+                    <div class="grid three">
+                        <label>来源学习记录
+                            <select name="sourceSessionId">
+                                <option value="">无</option>
+                                <option th:each="session : ${sessions}" th:value="${session.id}" th:text="${session.date + ' · ' + session.title}"></option>
+                            </select>
+                        </label>
+                        <label>掌握度 <input type="number" name="mastery" min="0" max="100" value="50"></label>
+                        <label class="check-row"><input type="checkbox" name="needReview" checked> 自动生成复习计划</label>
+                    </div>
+                    <button type="submit">保存知识点卡片</button>
+                </form>
+            </div>
+
+            <div class="panel">
+                <h2>知识双链 / 联系与对比</h2>
+                <form th:action="@{/knowledge-cards/links}" method="post">
+                    <label>源知识点
+                        <select name="sourceKnowledgeId" required>
+                            <option th:each="card : ${allCards}" th:value="${card.id}" th:text="${'#' + card.id + ' · ' + card.topic}"></option>
+                        </select>
+                    </label>
+                    <label>目标知识点
+                        <select name="targetKnowledgeId" required>
+                            <option th:each="card : ${allCards}" th:value="${card.id}" th:text="${'#' + card.id + ' · ' + card.topic}"></option>
+                        </select>
+                    </label>
+                    <label>关系类型 <input name="relationType" value="关联"></label>
+                    <label>连接理由 <textarea name="relationNote"></textarea></label>
+                    <label>联系 / 对比 <textarea name="comparePoints"></textarea></label>
+                    <button type="submit">建立知识链接</button>
+                </form>
+            </div>
+        </section>
+
+        <section class="panel mt">
+            <h2>知识点列表</h2>
+            <form class="toolbar" th:action="@{/knowledge-cards}" method="get">
+                <label>按科目筛选
+                    <select name="subject">
+                        <option value="全部" th:selected="${selectedSubject == '全部'}">全部</option>
+                        <option th:each="subject : ${subjects}" th:value="${subject}" th:text="${subject}" th:selected="${subject == selectedSubject}"></option>
+                    </select>
+                </label>
+                <button class="secondary" type="submit">筛选</button>
+            </form>
+            <div class="empty" th:if="${#lists.isEmpty(cards)}">还没有知识点卡片。</div>
+            <details th:each="card : ${cards}">
+                <summary>
+                    <span th:text="${card.subject + ' · ' + card.topic}">知识点</span>
+                    <span class="tag" th:text="${card.mastery + '%'}">掌握度</span>
+                </summary>
+                <div class="details-body">
+                    <p><strong>核心问题：</strong><span th:text="${card.coreQuestion}">问题</span></p>
+                    <p><strong>一句话解释：</strong><span th:text="${card.oneSentence}">解释</span></p>
+                    <form th:action="@{/knowledge-cards/{id}/update(id=${card.id})}" method="post">
+                        <div class="grid two">
+                            <label>科目 <input name="subject" th:value="${card.subject}"></label>
+                            <label>知识点 <input name="topic" th:value="${card.topic}" required></label>
+                        </div>
+                        <label>核心问题 <textarea name="coreQuestion" th:text="${card.coreQuestion}"></textarea></label>
+                        <label>一句话解释 <textarea name="oneSentence" th:text="${card.oneSentence}" required></textarea></label>
+                        <label>公式 / 逻辑推导 <textarea name="logicOrFormula" th:text="${card.logicOrFormula}"></textarea></label>
+                        <label>典型题 / 应用场景 <textarea name="application" th:text="${card.application}"></textarea></label>
+                        <div class="grid three">
+                            <label>来源学习记录
+                                <select name="sourceSessionId">
+                                    <option value="">无</option>
+                                    <option th:each="session : ${sessions}" th:value="${session.id}" th:text="${session.date + ' · ' + session.title}" th:selected="${card.sourceSessionId != null and card.sourceSessionId == session.id}"></option>
+                                </select>
+                            </label>
+                            <label>掌握度 <input type="number" name="mastery" min="0" max="100" th:value="${card.mastery}"></label>
+                            <label class="check-row"><input type="checkbox" name="needReview" th:checked="${card.needReview}"> 需要复习</label>
+                        </div>
+                        <button type="submit">更新知识点</button>
+                    </form>
+                    <form th:action="@{/knowledge-cards/{id}/delete(id=${card.id})}" method="post">
+                        <button class="danger-button small-button" type="submit">删除知识点</button>
+                    </form>
+                </div>
+            </details>
+        </section>
+
+        <section class="panel mt">
+            <h2>已建立的知识链接</h2>
+            <div class="empty" th:if="${#lists.isEmpty(links)}">还没有知识链接。</div>
+            <table class="table" th:if="${!#lists.isEmpty(links)}">
+                <thead><tr><th>源知识点</th><th>目标知识点</th><th>关系</th><th>说明</th><th>操作</th></tr></thead>
+                <tbody>
+                <tr th:each="item : ${links}">
+                    <td th:text="${item.sourceLabel}">源</td>
+                    <td th:text="${item.targetLabel}">目标</td>
+                    <td th:text="${item.link.relationType}">关系</td>
+                    <td th:text="${item.link.relationNote + ' ' + item.link.comparePoints}">说明</td>
+                    <td>
+                        <form th:action="@{/knowledge-cards/links/{id}/delete(id=${item.link.id})}" method="post">
+                            <button class="danger-button small-button" type="submit">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+</div>
+</body>
+</html>

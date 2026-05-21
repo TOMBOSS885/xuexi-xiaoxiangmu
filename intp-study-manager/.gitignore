@@ -1,0 +1,6 @@
+target/
+.mvn/wrapper/maven-wrapper.jar
+data/uploads/
+data/page_images/
+data/*.db-wal
+data/*.db-shm
