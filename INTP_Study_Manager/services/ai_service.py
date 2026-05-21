@@ -19,6 +19,7 @@ PROVIDER_TYPES = {
     "anthropic_messages": "Anthropic Messages API",
     "gemini_generate_content": "Google Gemini generateContent",
     "custom_http_json": "自定义 HTTP JSON",
+    "minimax_chat": "MiniMax Chat API",
 }
 
 DEFAULT_PROVIDERS = [
@@ -98,6 +99,17 @@ DEFAULT_PROVIDERS = [
         "extra_headers_json": "{}",
         "request_template_json": "",
         "response_path": "candidates.0.content.parts.0.text",
+    },
+    {
+        "name": "MiniMax",
+        "provider_type": "minimax_chat",
+        "base_url": "https://api.minimax.chat/v1",
+        "model": "MiniMax-Text-01",
+        "api_key_env": "MINIMAX_API_KEY",
+        "auth_type": "bearer",
+        "extra_headers_json": "{}",
+        "request_template_json": "",
+        "response_path": "choices.0.message.content",
     },
 ]
 
@@ -348,6 +360,14 @@ def _build_request(
             raise AIServiceError("自定义 HTTP JSON Provider 尚未实现图片直传。")
         url = provider.base_url.strip()
         body = _render_custom_body(provider.request_template_json, prompt, model, max_output_tokens)
+    elif provider.provider_type == "minimax_chat":
+        url = _join_url(provider.base_url or "https://api.minimax.chat/v1", "chat/completions")
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": max_output_tokens,
+        }
     else:
         raise AIServiceError(f"未知 Provider 类型：{provider.provider_type}")
 
@@ -423,6 +443,7 @@ def _default_response_path(provider_type: str) -> str:
         "openai_chat": "choices.0.message.content",
         "anthropic_messages": "content.0.text",
         "gemini_generate_content": "candidates.0.content.parts.0.text",
+        "minimax_chat": "choices.0.message.content",
     }.get(provider_type, "")
 
 

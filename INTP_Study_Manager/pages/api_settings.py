@@ -426,6 +426,12 @@ def _render_help() -> None:
 - 鉴权：`URL 查询参数 ?key=<key>`
 - 响应路径：`candidates.0.content.parts.0.text`
 
+**MiniMax**
+- Provider 类型：MiniMax Chat API
+- Base URL：`https://api.minimax.chat/v1`
+- 鉴权：`Authorization: Bearer <key>`
+- 响应路径：`choices.0.message.content`
+
 **自定义 HTTP JSON**
 - Base URL / Endpoint 填完整 POST 地址。
 - 请求体模板必须是 JSON。
