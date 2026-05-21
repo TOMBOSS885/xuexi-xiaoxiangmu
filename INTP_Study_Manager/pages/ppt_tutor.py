@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from services.ai_service import (
     generate_text,
     is_quota_error,
     list_api_providers,
+    list_available_models,
     provider_label,
 )
 from services.api_key_ui import render_local_secret_unlock
@@ -46,6 +49,7 @@ def render() -> None:
     st.title("PPT 逐页讲解")
     st.caption("边看 PPT 边让 GPT 按页讲解；插问单独进入浮窗，不覆盖当前页主线讲解。")
 
+    _resume_interrupted_generation()
     _render_api_settings()
     decks = fetch_all(
         """
@@ -101,7 +105,7 @@ def _render_api_settings() -> None:
         st.caption("选择任意已启用 Provider。API Key 只保存在当前 Streamlit 会话里，不写入 SQLite。")
         providers = list_api_providers(enabled_only=True)
         if not providers:
-            st.warning("没有启用的 Provider。请先到“API 接入设置”页面创建。")
+            st.warning("没有启用的 Provider。请先到「API 接入设置」页面创建。")
             return
 
         current_provider_id, _ = ensure_active_provider(providers)
@@ -116,17 +120,10 @@ def _render_api_settings() -> None:
         provider = next(p for p in providers if p["id"] == provider_id)
         ensure_provider_model(provider)
 
-        model = st.text_input(
-            "当前 API 临时模型",
-            key=provider_model_state_key(provider_id),
-            help="这个模型跟随当前 Provider 保存；切换 API 后会恢复该 API 自己的临时模型。",
-        )
-        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
-        set_active_provider(provider_id, active_model)
         key_name = f"api_key_provider_{provider_id}"
         render_local_secret_unlock(
             provider,
-            model=active_model,
+            model=provider.get("model") or DEFAULT_MODEL,
             target_session_key=key_name,
             key_prefix=f"ppt_provider_{provider_id}",
         )
@@ -137,6 +134,38 @@ def _render_api_settings() -> None:
             placeholder=f"不填写则读取环境变量 {provider.get('api_key_env') or '未设置'}",
         )
         st.session_state[key_name] = api_key
+
+        available_models = []
+        if api_key or os.getenv(provider.get("api_key_env") or ""):
+            available_models = list_available_models(provider, api_key=api_key)
+
+        model_key = provider_model_state_key(provider_id)
+        current_model = st.session_state.get(model_key, "").strip()
+        if not current_model:
+            current_model = provider.get("model") or DEFAULT_MODEL
+
+        if available_models:
+            model_index = 0
+            if current_model in available_models:
+                model_index = available_models.index(current_model)
+            model = st.selectbox(
+                "模型（已扫描）",
+                available_models,
+                index=model_index,
+                key=model_key,
+                help="已扫描到的可用模型。",
+            )
+            st.caption(f"✅ 已扫描到 {len(available_models)} 个可用模型")
+        else:
+            model = st.text_input(
+                "当前 API 临时模型（未扫描到可用模型）",
+                value=current_model,
+                key=model_key,
+                help="无法自动扫描此 Provider 的可用模型，请手动输入模型名称。",
+            )
+            st.caption("⚠️ 无法扫描到此 Provider 的可用模型列表，请手动填写模型名。")
+        active_model = model.strip() or provider.get("model") or DEFAULT_MODEL
+        set_active_provider(provider_id, active_model)
         max_tokens = st.number_input(
             "最大输出 token",
             min_value=512,
@@ -215,6 +244,7 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
         st.warning("当前 Provider / 模型看起来不支持图片输入。空白扫描页会被跳过；请切换视觉模型，或重新导入可提取文字的 PDF。")
     selected_slides, range_label = _select_generation_range(slides)
     st.caption(f"当前生成范围：{range_label}；将逐页调用 API 并保存到右侧讲解区。")
+    run_in_background = st.checkbox("后台运行（切换页面时继续生成）", value=True)
     if st.button("生成所选范围逐页讲解", type="primary"):
         _generate_whole_deck_explanations(
             deck,
@@ -223,6 +253,7 @@ def _render_deck_actions(deck: dict, slides: list[dict], latest_by_slide_id: dic
             send_image_when_no_text=send_image_when_no_text,
             supports_image_input=supports_image_input,
             latest_by_slide_id=latest_by_slide_id,
+            background=run_in_background,
         )
 
 
@@ -232,7 +263,7 @@ def _render_synced_reader(deck: dict, slides: list[dict], latest_by_slide_id: di
     question_by_slide_id = _questions_by_slide_ids([int(slide["id"]) for slide in slides])
     payload = _build_reader_payload(slides, latest_by_slide_id, question_by_slide_id)
     if not payload:
-        st.warning("当前资料还没有可显示的原页面图片。请先点击“生成 / 修复原页面图片”。")
+        st.warning("当前资料没有任何幻灯片数据。")
         return
 
     synced_reader_component = _get_synced_reader_component()
@@ -790,6 +821,39 @@ def _render_question_history(slide_id: int) -> None:
         st.dataframe(pd.DataFrame(questions), use_container_width=True, hide_index=True)
 
 
+def _resume_interrupted_generation() -> None:
+    task = st.session_state.get("ppt_generation_task")
+    if not task:
+        return
+
+    status = task.get("status")
+    stop_requested = task.get("stop_requested")
+
+    # 处理停止请求：用户点击停止时立即更新状态，不等后台线程
+    if stop_requested and status == "running":
+        task["status"] = "stopped"
+        task["status_text"] = task.get("status_text", "生成已停止")
+        status = "stopped"
+
+    if status == "completed":
+        st.success(f"✅ 生成完成：{task['generated']} 页")
+        return
+    if status == "stopped":
+        st.warning(f"⚠️ 已停止：{task.get('status_text', '生成已中断')}")
+        return
+    if status != "running":
+        return
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        st.info("⏳ 后台生成进行中...")
+        st.progress(task["progress"], text=task.get("status_text", "生成中..."))
+    with col2:
+        if st.button("停止", key="stop_generation"):
+            task["stop_requested"] = True
+            st.rerun()
+
+
 def _generate_whole_deck_explanations(
     deck: dict,
     slides: list[dict],
@@ -798,6 +862,7 @@ def _generate_whole_deck_explanations(
     send_image_when_no_text: bool,
     supports_image_input: bool,
     latest_by_slide_id: dict[int, dict],
+    background: bool = False,
 ) -> None:
     targets = []
     for slide in slides:
@@ -810,14 +875,45 @@ def _generate_whole_deck_explanations(
         st.info("所有页面都已有讲解。")
         return
 
-    progress = st.progress(0, text="准备生成逐页讲解...")
-    generated = 0
-    skipped = 0
     provider_id = st.session_state.get("active_api_provider_id")
     api_key = _active_api_key()
     active_model = st.session_state.get("active_api_model", DEFAULT_MODEL)
     max_tokens = int(st.session_state.get("active_api_max_tokens", 4096))
     active_model_label = _active_model_label()
+    total = len(targets)
+
+    if background:
+        task = {
+            "status": "running",
+            "progress": 0.0,
+            "status_text": f"正在分析第 1 页 / 共 {total} 页待生成...",
+            "generated": 0,
+            "deck_id": int(deck["id"]),
+            "targets": [int(s["id"]) for s in targets],
+            "only_missing": only_missing,
+            "send_image_when_no_text": send_image_when_no_text,
+            "supports_image_input": supports_image_input,
+            "provider_id": provider_id,
+            "api_key": api_key,
+            "active_model": active_model,
+            "max_tokens": max_tokens,
+            "active_model_label": active_model_label,
+            "completed": False,
+            "stop_requested": False,
+        }
+        st.session_state["ppt_generation_task"] = task
+        thread = threading.Thread(
+            target=_background_generation_worker,
+            args=(task, deck, targets),
+            daemon=True,
+        )
+        thread.start()
+        st.rerun()
+        return
+
+    progress = st.progress(0, text="准备生成逐页讲解...")
+    generated = 0
+    skipped = 0
     for index, slide in enumerate(targets, start=1):
         image_paths = _image_paths_for_generation(
             slide,
@@ -893,6 +989,56 @@ def _generate_whole_deck_explanations(
         st.info("没有生成新讲解。被跳过的页面需要可提取文字、OCR，或支持图片输入的视觉模型。")
 
 
+def _background_generation_worker(task: dict, deck: dict, targets: list[dict]) -> None:
+    from services.ai_service import AIServiceError, generate_text
+    skipped = 0
+    total = len(targets)
+    reasoning_depth = st.session_state.get("active_api_reasoning_depth")
+
+    for index, slide in enumerate(targets, start=1):
+        if task.get("stop_requested"):
+            task["status"] = "stopped"
+            task["status_text"] = f"已停止：{index - 1} 页"
+            return
+        task["progress"] = (index - 1) / total
+        task["status_text"] = f"正在分析第 {slide['slide_number']} 页 / 共 {total} 页待生成..."
+
+        from pages.ppt_tutor import _is_text_empty, _image_paths_for_generation, _build_slide_prompt
+        image_paths = _image_paths_for_generation(
+            slide,
+            task["send_image_when_no_text"],
+            supports_image_input=task["supports_image_input"],
+        )
+        if _is_text_empty(slide) and not image_paths:
+            skipped += 1
+            continue
+        prompt = _build_slide_prompt(deck, slide, image_attached=bool(image_paths))
+        try:
+            explanation = generate_text(
+                prompt,
+                provider_id=task["provider_id"],
+                api_key=task["api_key"],
+                model_override=task["active_model"],
+                image_paths=image_paths,
+                max_output_tokens=task["max_tokens"],
+                reasoning_depth=reasoning_depth,
+            )
+            insert_and_get_id(
+                """
+                INSERT INTO slide_explanations (slide_id, model, explanation)
+                VALUES (?, ?, ?)
+                """,
+                (slide["id"], task["active_model_label"], explanation),
+            )
+        except AIServiceError:
+            pass
+
+    task["status"] = "completed"
+    task["progress"] = 1.0
+    task["generated"] = len(targets) - skipped
+    task["status_text"] = f"生成完成：{task['generated']} 页"
+
+
 def _build_reader_payload(
     slides: list[dict],
     latest_by_slide_id: dict[int, dict],
@@ -901,15 +1047,21 @@ def _build_reader_payload(
     payload = []
     for slide in slides:
         image_path = Path(slide.get("image_path") or "")
-        if not image_path.exists():
-            continue
         latest = latest_by_slide_id.get(int(slide["id"]))
+        slide_text = slide.get("slide_text") or ""
+        slide_title = slide.get("title") or f"第 {slide['slide_number']} 页"
+
+        if image_path.exists() and image_path.is_file():
+            image_data = _image_data_uri(image_path)
+        else:
+            image_data = ""
+
         payload.append(
             {
                 "slideNumber": int(slide["slide_number"]),
-                "title": slide.get("title") or f"第 {slide['slide_number']} 页",
-                "image": _image_data_uri(image_path),
-                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。点击上方“生成整份资料逐页讲解”后会自动填入。",
+                "title": slide_title,
+                "image": image_data,
+                "explanation": latest["explanation"] if latest else "本页还没有 AI 讲解。" + (f"\n\n参考文字：\n{slide_text[:200]}..." if slide_text else ""),
                 "model": latest["model"] if latest else "",
                 "createdAt": latest["created_at"] if latest else "",
                 "questions": question_by_slide_id.get(int(slide["id"]), []),
@@ -1464,6 +1616,8 @@ def _build_synced_reader_html(deck: dict, payload: list[dict]) -> str:
 
 
 def _image_data_uri(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
     suffix = path.suffix.lower().lstrip(".") or "png"
     mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
